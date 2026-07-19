@@ -41,10 +41,10 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")  # openai | claude
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
 
-# Rate limiting
-COOLDOWN_SECONDS = 180        # 3 минуты между любыми ответами
-PER_USER_COOLDOWN = 600       # 10 минут между ответами одному человеку
-DAILY_LIMIT = 30              # максимум ответов в сутки
+# Rate limiting (отключено для отладки)
+COOLDOWN_SECONDS = 0          # 3 минуты между любыми ответами
+PER_USER_COOLDOWN = 0         # 10 минут между ответами одному человеку
+DAILY_LIMIT = 999             # максимум ответов в сутки
 TRIGGER_THRESHOLD = 25        # минимальный score для срабатывания
 
 # Случайность — имитация живого настроения
