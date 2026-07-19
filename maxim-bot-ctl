@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+# maxim-bot-ctl — управление ботом Максима (systemd)
+#
+# Использование:
+#   ./maxim-bot-ctl start       запустить
+#   ./maxim-bot-ctl stop        остановить
+#   ./maxim-bot-ctl restart     перезапустить
+#   ./maxim-bot-ctl status      статус
+#   ./maxim-bot-ctl logs        последние логи
+#   ./maxim-bot-ctl logs -f     логи в реальном времени
+#   ./maxim-bot-ctl install     установить systemd-сервис (нужен root)
+#
+# Переменные окружения читаются из .env в этой же папке.
+
+set -euo pipefail
+cd "$(dirname "$0")"
+
+SERVICE_NAME="maxim-bot"
+PYTHON="${PYTHON:-python3}"
+BOT_SCRIPT="./maxim_bot.py"
+ENV_FILE="./.env"
+
+# Цвета
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+cmd="${1:-status}"
+shift || true
+
+# ---------------------------------------------------------------------------
+# Вспомогательные функции
+# ---------------------------------------------------------------------------
+
+check_env() {
+    if [ ! -f "$ENV_FILE" ]; then
+        echo -e "${RED}[ОШИБКА]${NC} Файл .env не найден. Создайте его из .env.example"
+        exit 1
+    fi
+    # shellcheck source=/dev/null
+    set -a && source "$ENV_FILE" && set +a
+    if [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
+        echo -e "${RED}[ОШИБКА]${NC} TELEGRAM_BOT_TOKEN не задан в .env"
+        exit 1
+    fi
+}
+
+setup_venv() {
+    if [ ! -d "venv" ]; then
+        echo -e "${YELLOW}[SETUP]${NC} Создаю виртуальное окружение..."
+        $PYTHON -m venv venv
+        source venv/bin/activate
+        pip install --upgrade pip
+        pip install aiogram openai
+        echo -e "${GREEN}[OK]${NC} Виртуальное окружение создано"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Команды для прямого запуска (без systemd)
+# ---------------------------------------------------------------------------
+
+run_direct() {
+    check_env
+    setup_venv
+    echo -e "${GREEN}[START]${NC} Запускаю бота в фоне (nohup)..."
+    source venv/bin/activate
+    nohup $PYTHON "$BOT_SCRIPT" > logs/bot.log 2>&1 &
+    echo $! > maxim-bot.pid
+    sleep 1
+    if kill -0 "$(cat maxim-bot.pid)" 2>/dev/null; then
+        echo -e "${GREEN}[OK]${NC} PID=$(cat maxim-bot.pid). Логи: logs/bot.log"
+    else
+        echo -e "${RED}[ОШИБКА]${NC} Не удалось запустить. Смотрите logs/bot.log"
+        exit 1
+    fi
+}
+
+stop_direct() {
+    if [ -f maxim-bot.pid ]; then
+        pid=$(cat maxim-bot.pid)
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid"
+            echo -e "${GREEN}[OK]${NC} Процесс $pid остановлен"
+        else
+            echo -e "${YELLOW}[!]${NC} Процесс $pid не найден"
+        fi
+        rm -f maxim-bot.pid
+    else
+        echo -e "${YELLOW}[!]${NC} PID-файл не найден"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Команды для systemd
+# ---------------------------------------------------------------------------
+
+install_service() {
+    local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
+    local current_dir
+    current_dir="$(pwd)"
+    local current_user
+    current_user="$(whoami)"
+
+    if [ "$(id -u)" -ne 0 ]; then
+        echo -e "${YELLOW}[!]${NC} Для установки systemd-сервиса нужен root. Использую sudo..."
+    fi
+
+    sudo tee "$service_file" > /dev/null <<SYSTEMD
+[Unit]
+Description=Maxim Dementyev Telegram Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${current_user}
+WorkingDirectory=${current_dir}
+EnvironmentFile=${current_dir}/.env
+ExecStart=${current_dir}/venv/bin/python ${current_dir}/maxim_bot.py
+Restart=always
+RestartSec=10
+StandardOutput=append:${current_dir}/logs/bot.log
+StandardError=append:${current_dir}/logs/bot-error.log
+
+# Безопасность
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
+SYSTEMD
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable "$SERVICE_NAME"
+    echo -e "${GREEN}[OK]${NC} Сервис установлен: ${service_file}"
+    echo -e "  Запустить:    ${YELLOW}sudo systemctl start ${SERVICE_NAME}${NC}"
+    echo -e "  Статус:       ${YELLOW}sudo systemctl status ${SERVICE_NAME}${NC}"
+    echo -e "  Логи:         ${YELLOW}sudo journalctl -u ${SERVICE_NAME} -f${NC}"
+}
+
+systemd_cmd() {
+    local action="$1"
+    if systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
+        sudo systemctl "$action" "$SERVICE_NAME"
+    else
+        echo -e "${RED}[ОШИБКА]${NC} systemd-сервис не установлен. Запустите: $0 install"
+        exit 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Основная логика
+# ---------------------------------------------------------------------------
+
+mkdir -p logs
+
+case "$cmd" in
+    start)
+        if systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
+            systemd_cmd start
+        else
+            run_direct
+        fi
+        ;;
+    stop)
+        if systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
+            systemd_cmd stop
+        else
+            stop_direct
+        fi
+        ;;
+    restart)
+        if systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
+            systemd_cmd restart
+        else
+            stop_direct
+            sleep 2
+            run_direct
+        fi
+        ;;
+    status)
+        if systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
+            sudo systemctl status "$SERVICE_NAME"
+        elif [ -f maxim-bot.pid ]; then
+            pid=$(cat maxim-bot.pid)
+            if kill -0 "$pid" 2>/dev/null; then
+                echo -e "${GREEN}[RUNNING]${NC} PID=$pid"
+                echo "Последние 10 строк лога:"
+                tail -10 logs/bot.log
+            else
+                echo -e "${RED}[STOPPED]${NC} PID=$pid не существует"
+            fi
+        else
+            echo -e "${RED}[STOPPED]${NC} Бот не запущен"
+        fi
+        ;;
+    logs)
+        if systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
+            sudo journalctl -u "$SERVICE_NAME" "$@"
+        else
+            if [ "${1:-}" = "-f" ]; then
+                tail -f logs/bot.log
+            else
+                tail -50 logs/bot.log
+            fi
+        fi
+        ;;
+    install)
+        check_env
+        setup_venv
+        install_service
+        ;;
+    *)
+        echo "Использование: $0 {start|stop|restart|status|logs|install}"
+        exit 1
+        ;;
+esac
