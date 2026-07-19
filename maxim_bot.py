@@ -35,6 +35,7 @@ from aiogram.client.default import DefaultBotProperties
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "")  # для DeepSeek: https://api.deepseek.com
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")  # openai | claude
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
@@ -266,7 +267,10 @@ class MaximResponseEngine:
         else:
             try:
                 from openai import AsyncOpenAI
-                self.client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+                client_kwargs = {"api_key": OPENAI_API_KEY}
+                if OPENAI_BASE_URL:
+                    client_kwargs["base_url"] = OPENAI_BASE_URL
+                self.client = AsyncOpenAI(**client_kwargs)
                 self._generate = self._generate_openai
             except ImportError:
                 raise RuntimeError("pip install openai")
@@ -387,9 +391,8 @@ async def cmd_debug(message: types.Message):
     )
 
 
-@dp.channel_post()
-async def handle_channel_post(message: types.Message):
-    """Обрабатывает каждое сообщение в канале."""
+async def _process_message(message: types.Message):
+    """Общая логика обработки сообщения (канал или группа)."""
     global bot_started
 
     if not bot_started:
@@ -445,6 +448,22 @@ async def handle_channel_post(message: types.Message):
         logger.info(f"[SENT] to={sender} trigger_score={trigger.score} response={response[:100]}")
     except Exception as e:
         logger.error(f"[SEND ERROR] {e}")
+
+
+@dp.channel_post()
+async def handle_channel_post(message: types.Message):
+    """Обрабатывает сообщения в канале."""
+    await _process_message(message)
+
+
+@dp.message()
+async def handle_group_message(message: types.Message):
+    """Обрабатывает не-командные сообщения в группах/супергруппах.
+    Срабатывает только после того, как все Command-хендлеры не подошли."""
+    # Не обрабатываем личные сообщения (чтобы не мешать /start /status /debug)
+    if message.chat.type == "private":
+        return
+    await _process_message(message)
 
 
 # ---------------------------------------------------------------------------
