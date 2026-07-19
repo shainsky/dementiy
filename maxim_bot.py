@@ -365,13 +365,16 @@ async def cmd_stop(message: types.Message):
 
 @dp.message(Command("status"))
 async def cmd_status(message: types.Message):
-    await message.answer(
-        f"📊 Статус:\n"
-        f"Активен: {'да' if bot_started else 'нет'}\n"
-        f"Ответов сегодня: {rate_limiter.daily_count}/{DAILY_LIMIT}\n"
-        f"Контекст: {len(channel_context.messages)} сообщений\n"
-        f"Порог триггера: {TRIGGER_THRESHOLD}"
-    )
+    try:
+        await message.answer(
+            f"📊 Статус:\n"
+            f"Активен: {'да' if bot_started else 'нет'}\n"
+            f"Ответов сегодня: {rate_limiter.daily_count}/{DAILY_LIMIT}\n"
+            f"Контекст: {len(channel_context.messages)} сообщений\n"
+            f"Порог триггера: {TRIGGER_THRESHOLD}"
+        )
+    except Exception as e:
+        logger.error(f"[STATUS ERROR] {e}")
 
 
 @dp.message(Command("debug"))
@@ -396,17 +399,23 @@ async def _process_message(message: types.Message):
     global bot_started
 
     if not bot_started:
+        logger.info(f"[SKIP] bot_started=False — отправьте /start боту в личку")
         return
 
     # Пропускаем служебные сообщения и свои ответы
     if not message.text and not message.caption:
+        logger.info(f"[SKIP] нет текста (text={message.text!r} caption={message.caption!r})")
         return
     if message.from_user and message.from_user.is_bot:
+        logger.info(f"[SKIP] сообщение от бота: {message.from_user.full_name}")
         return
 
     text = message.text or message.caption or ""
     sender = message.author_signature or (message.from_user.full_name if message.from_user else "Unknown")
     user_id = message.from_user.id if message.from_user else 0
+    chat_type = message.chat.type
+
+    logger.info(f"[MSG] chat={chat_type} from={sender} user_id={user_id} text={text[:80]!r}")
 
     # Сохраняем в контекст
     channel_context.add(text, sender)
@@ -453,6 +462,7 @@ async def _process_message(message: types.Message):
 @dp.channel_post()
 async def handle_channel_post(message: types.Message):
     """Обрабатывает сообщения в канале."""
+    logger.info(f"[HANDLER] channel_post вызван")
     await _process_message(message)
 
 
@@ -462,7 +472,9 @@ async def handle_group_message(message: types.Message):
     Срабатывает только после того, как все Command-хендлеры не подошли."""
     # Не обрабатываем личные сообщения (чтобы не мешать /start /status /debug)
     if message.chat.type == "private":
+        logger.info(f"[HANDLER] личное сообщение пропущено: {message.text!r}")
         return
+    logger.info(f"[HANDLER] group_message: chat={message.chat.type} text={message.text!r}")
     await _process_message(message)
 
 
