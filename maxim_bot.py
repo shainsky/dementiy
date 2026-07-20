@@ -11,7 +11,8 @@
     OPENAI_API_KEY          — ключ OpenAI (или ANTHROPIC_API_KEY)
     LLM_PROVIDER            — "openai" или "claude" (по умолчанию openai)
     LLM_MODEL               — модель (по умолчанию gpt-4o-mini)
-    CHANNEL_ID              — ID канала (например, -1001234567890)
+    CHANNEL_IDS             — ID каналов/групп через запятую (например, -100123,-100456).
+                            Оставьте пустым чтобы слушать ВСЕ группы, куда бот добавлен.
 """
 
 import os
@@ -39,7 +40,14 @@ OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "")  # для DeepSeek: https://a
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")  # openai | claude
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
-CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
+# CHANNEL_IDS: список через запятую. Пустая строка = слушать все группы.
+_CHANNEL_IDS_RAW = os.getenv("CHANNEL_IDS", "")
+CHANNEL_IDS: set[int] = set()
+if _CHANNEL_IDS_RAW.strip():
+    try:
+        CHANNEL_IDS = {int(x.strip()) for x in _CHANNEL_IDS_RAW.split(",") if x.strip()}
+    except ValueError:
+        raise RuntimeError(f"CHANNEL_IDS содержит некорректные значения: {_CHANNEL_IDS_RAW}")
 
 # Rate limiting (отключено для отладки)
 COOLDOWN_SECONDS = 0          # 3 минуты между любыми ответами
@@ -414,8 +422,14 @@ async def _process_message(message: types.Message):
     sender = message.author_signature or (message.from_user.full_name if message.from_user else "Unknown")
     user_id = message.from_user.id if message.from_user else 0
     chat_type = message.chat.type
+    chat_id = message.chat.id
 
-    logger.info(f"[MSG] chat={chat_type} from={sender} user_id={user_id} text={text[:80]!r}")
+    # Белый список каналов/групп (если задан)
+    if CHANNEL_IDS and chat_id not in CHANNEL_IDS:
+        logger.info(f"[SKIP] чат {chat_id} не в CHANNEL_IDS (разрешены: {CHANNEL_IDS})")
+        return
+
+    logger.info(f"[MSG] chat={chat_type} chat_id={chat_id} from={sender} user_id={user_id} text={text[:80]!r}")
 
     # Сохраняем в контекст
     channel_context.add(text, sender)
