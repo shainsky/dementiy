@@ -21,9 +21,10 @@ import time
 import random
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from dataclasses import dataclass, field
-from collections import defaultdict
+
+from maxim_style import build_system_prompt, choose_phrase_cue
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
@@ -59,6 +60,10 @@ TRIGGER_THRESHOLD = 25        # минимальный score для срабат
 RANDOM_JITTER = 10            # ± разброс score (0 = отключено)
 RANDOM_LONGSHOT = 0.03        # 3% шанс ответить, даже если score сильно ниже порога
 RANDOM_SILENCE = 0.05         # 5% шанс промолчать, даже если score выше порога
+STYLE_CUE_PROBABILITY = float(os.getenv("STYLE_CUE_PROBABILITY", "0.20"))
+if not 0.0 <= STYLE_CUE_PROBABILITY <= 1.0:
+    raise RuntimeError("STYLE_CUE_PROBABILITY должна быть в диапазоне 0..1")
+BOT_AUTO_START = os.getenv("BOT_AUTO_START", "1").lower() not in {"0", "false", "no"}
 
 # Top собеседники Максима (из анализа)
 TOP_INTERLOCUTORS = {
@@ -68,62 +73,14 @@ TOP_INTERLOCUTORS = {
 
 # Технические ключевые слова
 TECH_KEYWORDS = [
-    "llm", "prompt", "claude", "gemini", "gpt", "chatgpt", "модель",
-    "код", "python", "c++", "gstreamer", "venv", "контекст", "context",
-    "токен", "token", "нейро", "ai", "ии", "чат", "chat", "bot", "бот",
-    "embedding", "fine-tune", "prompt-engineering", "copilot", "cursor"
+    "llm", "prompt", "промпт", "claude", "gemini", "deepseek", "gpt",
+    "chatgpt", "модель", "нейросет", "агент", "mcp", "rag", "embedding",
+    "контекст", "context", "токен", "token", "ai", "ии", "чат", "chat",
+    "код", "python", "питон", "c++", "си++", "gstreamer", "pipewire",
+    "linux", "wayland", "компилят", "ассемблер", "микроконтроллер",
+    "playwright", "vs code", "vscode", "copilot", "cursor", "windsurf",
+    "git", "github", "api", "бот", "bot", "алгоритм", "отлад", "тест"
 ]
-
-# ---------------------------------------------------------------------------
-# Системный промпт
-# ---------------------------------------------------------------------------
-
-SYSTEM_PROMPT = """Ты — Максим Дементьев, участник технического чата «share-your-prompt».
-Ты общаешься с коллегами-технарями, которых давно знаешь.
-
-## Твой стиль
-
-Тон:
-- Прямой, неформальный, но не грубый
-- С самоиронией — можешь шутить над собой
-- Эмоциональный, но без истерики
-- Интеллектуальный юмор: культурные отсылки (Пушкин, Цой, советские фильмы)
-
-Структура ответа:
-- Начинай с «Да, ...» если согласен и развиваешь мысль
-- Или с «кстати» если хочешь неожиданно повернуть тему
-- 2-3 предложения, не больше
-- Можешь закончить «...» — это приглашение к диалогу
-- Используй «я не знаю» если сомневаешься
-- Используй «на мой взгляд» для личного мнения
-- Используй «на самом деле» для коррекции
-
-Лексика:
-- Смешивай русский с английскими техтерминами (LLM, prompt, context, model)
-- Используй «Gemini» и «Claude» — это твои основные инструменты
-- Можешь сказать «та же хуйня» если собеседник описывает проблему, которая и у тебя
-- Можешь сказать «Не буду вас больше мучить» после длинного объяснения
-
-Темы:
-- LLM, промпт-инжиниринг, C++, GStreamer, Python, встраиваемые системы
-- Ты активно экспериментируешь с разными LLM и делишься результатами
-- Ты часто в формате: «Me: [промпт] / Gemini: [ответ]»
-- Любишь философские наблюдения о технологиях и людях
-
-Запреты:
-- НЕ будь вежливым формально (никаких «Уважаемые коллеги», «Благодарю за вопрос»)
-- НЕ пиши длинные ответы (коротко, по делу)
-- НЕ используй смайлики часто (изредка 😉)
-- НЕ будь токсичным — ты ироничный, но доброжелательный
-
-Примеры твоих реальных ответов:
-- «Да, кстати, я не знаю, они в футбол играют или в паспортный контроль...»
-- «На самом деле в самом конце ответа чата жпт — самое главное: "Какую задачу решаете?"»
-- «Та же хуйня.»
-- «Братва, не стреляйте в друг друга!»
-- «Не буду вас больше мучить. Отвязываю от дыбы.»
-
-Ответь на сообщение ниже в своём стиле. Только ответ, без пояснений."""
 
 # ---------------------------------------------------------------------------
 # Детектор триггеров
@@ -262,6 +219,7 @@ class RateLimiter:
 class MaximResponseEngine:
     def __init__(self):
         self.client = None
+        self._recent_cues: list[str] = []
         self._init_client()
 
     def _init_client(self):
@@ -283,39 +241,63 @@ class MaximResponseEngine:
             except ImportError:
                 raise RuntimeError("pip install openai")
 
-    async def _generate_openai(self, user_message: str, context: list[str]) -> str:
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-        # Добавляем последние 3 сообщения для контекста
-        for ctx_msg in context[-3:]:
-            messages.append({"role": "user", "content": f"[Другой участник]: {ctx_msg}"})
-        messages.append({"role": "user", "content": f"[Сообщение, на которое надо ответить]: {user_message}"})
+    @staticmethod
+    def _context_lines(context: list[dict]) -> list[str]:
+        return [f"[Контекст чата, {item['from']}]: {item['text']}" for item in context[-5:]]
+
+    async def _generate_openai(
+        self, user_message: str, context: list[dict], system_prompt: str
+    ) -> str:
+        messages = [{"role": "system", "content": system_prompt}]
+        for context_line in self._context_lines(context):
+            messages.append({"role": "user", "content": context_line})
+        messages.append({
+            "role": "user",
+            "content": f"[Последняя реплика, на которую нужно ответить]: {user_message}",
+        })
 
         response = await self.client.chat.completions.create(
             model=LLM_MODEL,
             messages=messages,
-            max_tokens=150,
-            temperature=0.8,
+            max_tokens=220,
+            temperature=0.75,
         )
         return response.choices[0].message.content.strip()
 
-    async def _generate_claude(self, user_message: str, context: list[str]) -> str:
-        context_block = "\n".join(f"[Другой участник]: {m}" for m in context[-3:])
-        full_prompt = f"{SYSTEM_PROMPT}\n\nКонтекст:\n{context_block}\n\n[Сообщение, на которое надо ответить]: {user_message}"
-
+    async def _generate_claude(
+        self, user_message: str, context: list[dict], system_prompt: str
+    ) -> str:
+        context_block = "\n".join(self._context_lines(context)) or "(нет)"
         response = await self.client.messages.create(
             model=LLM_MODEL,
-            max_tokens=150,
-            temperature=0.8,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": f"Контекст:\n{context_block}\n\n[Сообщение]: {user_message}"}],
+            max_tokens=220,
+            temperature=0.75,
+            system=system_prompt,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"Контекст предыдущих реплик:\n{context_block}\n\n"
+                    f"[Последняя реплика, на которую нужно ответить]: {user_message}"
+                ),
+            }],
         )
         return response.content[0].text.strip()
 
-    async def generate(self, user_message: str, context: list[str] = None) -> str:
-        """Генерирует ответ в стиле Максима."""
-        if context is None:
-            context = []
-        return await self._generate(user_message, context)
+    async def generate(self, user_message: str, context: list[dict] | None = None) -> str:
+        """Генерирует ответ и изредка предлагает модели одну уместную фразу."""
+        context = context or []
+        cue = choose_phrase_cue(
+            user_message,
+            probability=STYLE_CUE_PROBABILITY,
+            excluded=self._recent_cues,
+        )
+        if cue:
+            self._recent_cues.append(cue.text)
+            self._recent_cues = self._recent_cues[-6:]
+            logging.getLogger(__name__).info(
+                "[STYLE-CUE] category=%s phrase=%r", cue.category, cue.text
+            )
+        return await self._generate(user_message, context, build_system_prompt(cue))
 
 
 # ---------------------------------------------------------------------------
@@ -323,21 +305,32 @@ class MaximResponseEngine:
 # ---------------------------------------------------------------------------
 
 class ChannelContext:
+    """Keeps independent conversation history for every channel/group."""
+
     def __init__(self, max_size: int = 50):
-        self.messages: list[dict] = []  # [{text, from, date}]
+        self.messages_by_chat: dict[int, list[dict]] = {}
+        self.last_message: dict | None = None
         self.max_size = max_size
 
-    def add(self, text: str, sender: str):
-        self.messages.append({
+    @property
+    def total_size(self) -> int:
+        return sum(len(messages) for messages in self.messages_by_chat.values())
+
+    def add(self, chat_id: int, text: str, sender: str):
+        message = {
+            "chat_id": chat_id,
             "text": text,
             "from": sender,
-            "date": datetime.now().isoformat()
-        })
-        if len(self.messages) > self.max_size:
-            self.messages = self.messages[-self.max_size:]
+            "date": datetime.now().isoformat(),
+        }
+        messages = self.messages_by_chat.setdefault(chat_id, [])
+        messages.append(message)
+        if len(messages) > self.max_size:
+            del messages[:-self.max_size]
+        self.last_message = message
 
-    def get_recent_texts(self, count: int = 5) -> list[str]:
-        return [m["text"] for m in self.messages[-count:]]
+    def get_recent(self, chat_id: int, count: int = 5) -> list[dict]:
+        return self.messages_by_chat.get(chat_id, [])[-count:]
 
 
 # ---------------------------------------------------------------------------
@@ -353,8 +346,8 @@ rate_limiter = RateLimiter()
 response_engine = MaximResponseEngine()
 channel_context = ChannelContext()
 
-# Для отслеживания состояния
-bot_started = False
+# По умолчанию systemd-рестарт сразу возвращает бота в рабочее состояние.
+bot_started = BOT_AUTO_START
 
 
 @dp.message(Command("start"))
@@ -378,7 +371,7 @@ async def cmd_status(message: types.Message):
             f"📊 Статус:\n"
             f"Активен: {'да' if bot_started else 'нет'}\n"
             f"Ответов сегодня: {rate_limiter.daily_count}/{DAILY_LIMIT}\n"
-            f"Контекст: {len(channel_context.messages)} сообщений\n"
+            f"Контекст: {channel_context.total_size} сообщений\n"
             f"Порог триггера: {TRIGGER_THRESHOLD}"
         )
     except Exception as e:
@@ -388,10 +381,10 @@ async def cmd_status(message: types.Message):
 @dp.message(Command("debug"))
 async def cmd_debug(message: types.Message):
     """Показывает, сработал бы триггер на последнее сообщение."""
-    if not channel_context.messages:
+    if channel_context.last_message is None:
         await message.answer("Нет сохранённых сообщений.")
         return
-    last = channel_context.messages[-1]
+    last = channel_context.last_message
     trigger = detect_trigger(last["text"], last["from"], 0)
     await message.answer(
         f"🔍 Последнее сообщение от {last['from']}:\n"
@@ -431,8 +424,10 @@ async def _process_message(message: types.Message):
 
     logger.info(f"[MSG] chat={chat_type} chat_id={chat_id} from={sender} user_id={user_id} text={text[:80]!r}")
 
-    # Сохраняем в контекст
-    channel_context.add(text, sender)
+    # Берём только предыдущие реплики этого чата. Текущую добавляем после
+    # снимка, чтобы LLM не увидела её дважды и чтобы разные чаты не смешивались.
+    context_messages = channel_context.get_recent(chat_id, 5)
+    channel_context.add(chat_id, text, sender)
 
     # Проверяем триггер
     trigger = detect_trigger(text, sender, user_id)
@@ -449,8 +444,7 @@ async def _process_message(message: types.Message):
 
     # Генерируем ответ
     try:
-        context_texts = channel_context.get_recent_texts(5)
-        response = await response_engine.generate(text, context_texts)
+        response = await response_engine.generate(text, context_messages)
     except Exception as e:
         logger.error(f"[LLM ERROR] {e}")
         return
@@ -466,7 +460,9 @@ async def _process_message(message: types.Message):
 
     # Отправляем
     try:
-        await message.reply(response)
+        # Ответ LLM — обычный текст. Не даём угловым скобкам из C++/HTML
+        # превращаться в Telegram entities и ломать отправку.
+        await message.reply(response, parse_mode=None)
         rate_limiter.record_response(user_id)
         logger.info(f"[SENT] to={sender} trigger_score={trigger.score} response={response[:100]}")
     except Exception as e:

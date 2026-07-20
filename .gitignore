@@ -1,0 +1,18 @@
+# Секреты — НИКОГДА не коммитить
+.env
+bot_key.txt
+deepseek.key
+
+# Данные
+xo-banya.json
+
+# Python
+__pycache__/
+*.pyc
+venv/
+logs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
