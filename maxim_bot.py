@@ -51,9 +51,9 @@ if _CHANNEL_IDS_RAW.strip():
         raise RuntimeError(f"CHANNEL_IDS содержит некорректные значения: {_CHANNEL_IDS_RAW}")
 
 # Rate limiting (отключено для отладки)
-COOLDOWN_SECONDS = 0          # 3 минуты между любыми ответами
-PER_USER_COOLDOWN = 0         # 10 минут между ответами одному человеку
-DAILY_LIMIT = 999             # максимум ответов в сутки
+COOLDOWN_SECONDS = 180          # 3 минуты между любыми ответами
+PER_USER_COOLDOWN = 300         # 10 минут между ответами одному человеку
+DAILY_LIMIT = 20             # максимум ответов в сутки
 TRIGGER_THRESHOLD = 25        # минимальный score для срабатывания
 
 # Случайность — имитация живого настроения
