@@ -8,6 +8,8 @@ services:
     volumes:
       # Вход Codex по подписке ChatGPT: docker compose run --rm bot codex login --device-auth
       - codex-home:/home/node/.codex
+      # Поправки Максима, утверждённые кнопкой в чате
+      - bot-data:/app/data
     # Песочнице codex (bubblewrap) нужны user namespaces. Без этих опций
     # Docker их запрещает, и `codex exec --sandbox read-only` падает.
     security_opt:
@@ -17,3 +19,4 @@ services:
 
 volumes:
   codex-home:
+  bot-data:

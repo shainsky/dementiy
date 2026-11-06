@@ -43,6 +43,9 @@ BASE_SYSTEM_PROMPT = """Ты отвечаешь как Максим Демент
 Максим чаще всего говорит про LLM и практику промптов; Claude Code и Codex (часто в паре: «Клод и Кодекс»), Gemini, ChatGPT, Copilot, VS Code и Playwright; разработку, отладку и автоматизацию; C++ и Python; компиляторы, оптимизацию, Linux/Wayland, GStreamer и мультимедиа; UX и раздражающие ограничения ПО.
 Но круг не ограничен технологиями: язык и точность формулировок, перевод, обучение, работа и контракты, наука и границы знания, эволюция/сознание, музыка, фильмы, анекдоты, бытовая жизнь во Франции и Марселе. На любую другую тему отвечай по контексту и общим знаниям — не притягивай знакомую тему искусственно.
 
+## Когда промолчать
+Ты не обязан отвечать на каждое сообщение, даже обращённое к тебе. Если ответ ничего не добавит — благодарность, «ок», «ага», разговор исчерпан, ты уже всё сказал, реплика адресована другому человеку, — верни ровно SKIP. Живой человек в чате тоже часто молчит. Если же есть что сказать по существу или тебя прямо спросили — отвечай.
+
 ## Фактические ограничения
 - Не выдумывай личный опыт, проект, работодателя, семейную деталь или мнение Максима, если этого нет в контексте или профиле выше.
 - Не утверждай, что лично что-то проверил, спросил у Gemini или применил в проекте, если контекст этого не подтверждает. Можно предложить проверить.
@@ -652,14 +655,13 @@ def choose_film_cues(
     return rng.sample(pool, k=k)
 
 
-def build_system_prompt(
+def build_hints(
     cue: PhraseCue | None = None,
     film_cues: Sequence[FilmQuote] = (),
 ) -> str:
-    """Build the stable persona prompt with at most one optional style cue
-    and an optional shortlist of film quotes for the LLM to optionally use."""
+    """Optional per-reply hints: at most one style cue and a film-quote shortlist."""
 
-    parts: list[str] = [BASE_SYSTEM_PROMPT]
+    parts: list[str] = []
     if cue is not None:
         kind = "редкая характерная цитата" if cue.distinctive else "разговорный оборот"
         parts.append(
@@ -678,7 +680,28 @@ def build_system_prompt(
                 f"{i}. «{q.text}» — {q.film} ({q.context_hint})"
             )
         parts.append("\n".join(lines))
-    parts.append(
-        "\n\nНе объясняй наличие подсказок в ответе. Верни только готовую реплику для чата."
-    )
+    return "\n".join(parts)
+
+
+FINAL_INSTRUCTION = (
+    "\n\nНе объясняй наличие подсказок в ответе. Верни только готовую реплику для чата "
+    "или ровно SKIP, если отвечать не нужно."
+)
+
+
+def build_system_prompt(
+    cue: PhraseCue | None = None,
+    film_cues: Sequence[FilmQuote] = (),
+    overrides_section: str = "",
+) -> str:
+    """Build the stable persona prompt with at most one optional style cue
+    and an optional shortlist of film quotes for the LLM to optionally use."""
+
+    parts: list[str] = [BASE_SYSTEM_PROMPT]
+    hints = build_hints(cue, film_cues)
+    if hints:
+        parts.append(hints)
+    if overrides_section:
+        parts.append(overrides_section)
+    parts.append(FINAL_INSTRUCTION)
     return "\n".join(parts)
